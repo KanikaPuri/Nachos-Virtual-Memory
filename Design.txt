@@ -1,0 +1,124 @@
+The design is simple, most of the work happens in run() of UserKernel, load() and
+loadSections() of UserProcess, and a new class called Allocator which can be
+found in nachos/userprog/. Let's talk about each separately and then concluded
+with the performance evaluation.
+
+UserKernel.run():
+
+This reads in the configuration parameter for the programs to be run and parses
+out the number and the individual names. Then, for each name, and for the number
+of iterations specified, it creates a new process of that program and calls
+execute() on it. It checks the return value of execute() to see if it was able
+to be loaded. If it was not, then if the pages it requires is less than the
+number of physical pages it places that process in a linked list to run later.
+If it needs too many pages, it is rejected.
+
+After it has spawned all of the processes, it then goes into a look where
+every time it is signaled that a process has terminated it loops through the
+linked list and runs as many programs as there is now memory for. Finally, once
+everything has been successfully loaded, it sets it priority very low so that
+the other processes can finish.
+
+UserProcess.load():
+
+This is mostly the same with the exception that it now checks the memory
+requirements and will only proceed to load the sections if there is enough.
+Otherwise it kicks it back to the kernel to be put in the queue/rejected.
+
+UserProcess.loadSections():
+
+This has been modified to use the new allocator to get a physical page number
+for each page that needs to be loaded and loading it to that page. It then
+updates the page table for the process to reflect this mapping. We changed it so
+that only the initialized pages are loaded into memory at the start.
+Uninitialized pages are left unmapped until a page fault happens at which point
+a frame is allocated. Note that page faults work in much the same way as this.
+They get a frame from the allocator and update the page table. The difference is
+that there is nothing to load into the newly allocated frame.
+
+Allocator:
+
+Here is where the big design decisions happened. We store an array of FrameInfo
+objects for quick random access. These are very small object containing 2
+integers for each physical frame. This uses very little memory: 8*numFrames
+number of bytes. We also maintain a linked list of free frames to allow for
+constant time operations for allocation and deleting. Frames are added at the
+end of the list when they are freed and removed from the beginning when it needs
+a frame to allocate. The function freeProcessFrames() frees all of the frames
+given to a process by iterating over the array and checking which belong to that
+process. This is a linear time operation with respect to the number of physical
+frames since freeing a single frame is constant time. Some performance increase
+could be had by keeping a linked list of frames for each process so that
+deleting them would only be linear with respect to the number of frames for that
+process but there are 2 reasons why we didn't do this. The first is complexity,
+our current design is much simpler. The second is that there would not be as
+much of a performance increase as it appears. The reason is that if a process
+uses lots of frames it will end up having to iterate over most of the array
+anyway. The linear time penalty is acceptable because it only happens once for
+every process and only after it is done executing.
+
+The rest of the class is dedicated to keeping track of the performance metrics.
+As a process is created/destroyed it reserves/unreserves frames.
+
+Performance of page size:
+
+All tests of performance were run using on of the Performance_<size>.conf
+files.
+
+The programs chosen to run were chosen to provide a complete mix of the
+different programs which could be ran on a system. Sort is a slow program
+requiring lots of CPU time and uses global uninitialized data. This means that
+it will not be read in at the time it is loaded but only when it tries to access
+it resulting in a page fault. Init is a program which makes use of a large
+initialized array so that it is forced to load it at start and thus will not
+generate page faults on that data during execution. Finally, recursive makes
+heavy use of the stack and so will require different number of pages depending
+on the page size. We run 20 of each program split into 2 rounds of 10 so that
+there is some good mixing going on.
+
+The page sizes explored were 256 bytes, 512 bytes, 1024 bytes, 4096 bytes, 32KB,
+and 64KB. These sizes were chosen because the cover a very large range from
+small to big. To go much bigger would require a larger memory size and so longer
+running programs to test it with which would be a very slow process. The number
+of physical pages is also adjusted each time so that the total amount of memory
+remains at 1MB since we want to see how page size affects performance for a
+given system with constant amount of physical memory. This size was chosen
+because it lets us fit quite a few programs in memory without being so large
+that they can all fit in at once.
+
+Here are the results:
+
++--------+---------+---------+---------+--------+-------------+-------+
+| pgSize | pgFault | maxProc | maxResv | maxMap | ttlPhyFrame | %used |
++--------+---------+---------+---------+--------+-------------+-------+
+| 256    | 6200    | 31      | 4088    | 3965   | 4096        | 99.8% |
+| 512    | 3140    | 30      | 2046    | 1848   | 2048        | 90.2% |
+| 1024   | 1600    | 27      | 1021    | 936    | 1024        | 91.4% |
+| 4096   | 440     | 16      | 255     | 176    | 256         | 68.7% |
+| 32KB   | 120     | 3       | 30      | 13     | 32          | 40.6% |
+| 64KB   | 100     | 1       | 12      | 5      | 16          | 31.3% |
++--------+---------+---------+---------+--------+-------------+-------+
+
+In the above table you can see the page size for that test on the far left and
+(in order) the number of page faults, max number of processes running, max
+reserved pages, max mapped number of frames, total frames for all of memory, and
+the percent of frames out of all of them that were able to be used. 
+
+You can very clearly see that as the page size goes up, the page faults go down
+at an approximately linear rate until they bottom out at the number of
+compulsory faults. It happens because with larger page sizes, more information
+is brought into memory with each fault and so few faults occur. This is a good
+thing. However, the number of concurrent processes it can support also goes down
+since the pages get so big that the sections of a program take up less and less
+of the space in a page (internal fragmentation). Also, the ratio of reserved
+frames to mapped frames is better for smaller page sizes. The reason being that
+the page size is small enough that program need more frames, but they also fully
+utilize them to the number mapped is closer to the number reserved. Perhaps the
+most revealing column in the percentage of system memory which was used. It
+severely drops off the bigger the page size for the reasons mentioned earlier.
+
+Looking closer, we see that the number of concurrent processes stays about the
+same for size 256, 512, and 1024 and %used is also very good for all of those
+sizes. For this reason it looks like 1024 byte page sizes are the best since
+there are far fewer page faults than with the smaller sizes but similar
+utilization.
